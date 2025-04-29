@@ -32,24 +32,20 @@ export class PhotoGalleryAppStack extends cdk.Stack {
 
     const deadLetterQueue = new sqs.Queue(this, "DeadLetterQueue", {
       receiveMessageWaitTime: cdk.Duration.seconds(10),
+      queueName: "PhotoGallery-DeadLetterQueue",
     });
 
     const logImageQueue = new sqs.Queue(this, "LogImageQueue", {
       receiveMessageWaitTime: cdk.Duration.seconds(10),
+      queueName: "PhotoGallery-LogImageQueue",
       deadLetterQueue: {
         queue: deadLetterQueue,
-        maxReceiveCount: 3,
+        maxReceiveCount: 1,
       },
     });
 
     photoGalleryTopic.addSubscription(
-      new subs.SqsSubscription(logImageQueue, {
-        filterPolicy: {
-          eventName: sns.SubscriptionFilter.stringFilter({
-            allowlist: ["ObjectCreated:*"],
-          }),
-        },
-      })
+      new subs.SqsSubscription(logImageQueue)
     );
 
     const logImageFn = new lambdanode.NodejsFunction(this, "LogImageFunction", {
@@ -60,7 +56,23 @@ export class PhotoGalleryAppStack extends cdk.Stack {
       environment: {
         TABLE_NAME: imageTable.tableName,
       },
+      functionName: "PhotoGallery-LogImageFunction",
     });
+
+    const removeImageFn = new lambdanode.NodejsFunction(
+      this,
+      "RemoveImageFunction",
+      {
+        runtime: lambda.Runtime.NODEJS_22_X,
+        entry: `${__dirname}/../lambdas/removeImage.ts`,
+        timeout: cdk.Duration.seconds(15),
+        memorySize: 256,
+        environment: {
+          BUCKET_NAME: imagesBucket.bucketName,
+        },
+        functionName: "PhotoGallery-RemoveImageFunction",
+      }
+    );
 
     imagesBucket.addEventNotification(
       s3.EventType.OBJECT_CREATED,
@@ -74,7 +86,16 @@ export class PhotoGalleryAppStack extends cdk.Stack {
       })
     );
 
+    removeImageFn.addEventSource(
+      new events.SqsEventSource(deadLetterQueue, {
+        batchSize: 5,
+        maxBatchingWindow: cdk.Duration.seconds(5),
+      })
+    );
+
     imagesBucket.grantRead(logImageFn);
+    imagesBucket.grantReadWrite(removeImageFn);
+    
     imageTable.grantReadWriteData(logImageFn);
 
     new cdk.CfnOutput(this, "ImagesBucketName", {
@@ -87,6 +108,10 @@ export class PhotoGalleryAppStack extends cdk.Stack {
 
     new cdk.CfnOutput(this, "ImageTableName", {
       value: imageTable.tableName,
+    });
+
+    new cdk.CfnOutput(this, "DeadLetterQueueUrl", {
+      value: deadLetterQueue.queueUrl,
     });
   }
 }
