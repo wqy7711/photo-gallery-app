@@ -32,20 +32,42 @@ export class PhotoGalleryAppStack extends cdk.Stack {
 
     const deadLetterQueue = new sqs.Queue(this, "DeadLetterQueue", {
       receiveMessageWaitTime: cdk.Duration.seconds(10),
-      queueName: "PhotoGallery-DeadLetterQueue",
     });
 
     const logImageQueue = new sqs.Queue(this, "LogImageQueue", {
       receiveMessageWaitTime: cdk.Duration.seconds(10),
-      queueName: "PhotoGallery-LogImageQueue",
       deadLetterQueue: {
         queue: deadLetterQueue,
-        maxReceiveCount: 1,
+        maxReceiveCount: 3,
+      },
+    });
+
+    const addMetadataQueue = new sqs.Queue(this, "AddMetadataQueue", {
+      receiveMessageWaitTime: cdk.Duration.seconds(10),
+      deadLetterQueue: {
+        queue: deadLetterQueue,
+        maxReceiveCount: 3,
       },
     });
 
     photoGalleryTopic.addSubscription(
-      new subs.SqsSubscription(logImageQueue)
+      new subs.SqsSubscription(logImageQueue, {
+        filterPolicy: {
+          eventName: sns.SubscriptionFilter.stringFilter({
+            allowlist: ["ObjectCreated:*"],
+          }),
+        },
+      })
+    );
+
+    photoGalleryTopic.addSubscription(
+      new subs.SqsSubscription(addMetadataQueue, {
+        filterPolicy: {
+          metadata_type: sns.SubscriptionFilter.stringFilter({
+            allowlist: ["Caption", "Date", "Name"],
+          }),
+        },
+      })
     );
 
     const logImageFn = new lambdanode.NodejsFunction(this, "LogImageFunction", {
@@ -56,7 +78,6 @@ export class PhotoGalleryAppStack extends cdk.Stack {
       environment: {
         TABLE_NAME: imageTable.tableName,
       },
-      functionName: "PhotoGallery-LogImageFunction",
     });
 
     const removeImageFn = new lambdanode.NodejsFunction(
@@ -70,7 +91,20 @@ export class PhotoGalleryAppStack extends cdk.Stack {
         environment: {
           BUCKET_NAME: imagesBucket.bucketName,
         },
-        functionName: "PhotoGallery-RemoveImageFunction",
+      }
+    );
+
+    const addMetadataFn = new lambdanode.NodejsFunction(
+      this,
+      "AddMetadataFunction",
+      {
+        runtime: lambda.Runtime.NODEJS_22_X,
+        entry: `${__dirname}/../lambdas/addMetadata.ts`,
+        timeout: cdk.Duration.seconds(15),
+        memorySize: 256,
+        environment: {
+          TABLE_NAME: imageTable.tableName,
+        },
       }
     );
 
@@ -93,10 +127,18 @@ export class PhotoGalleryAppStack extends cdk.Stack {
       })
     );
 
+    addMetadataFn.addEventSource(
+      new events.SqsEventSource(addMetadataQueue, {
+        batchSize: 5,
+        maxBatchingWindow: cdk.Duration.seconds(5),
+      })
+    );
+
     imagesBucket.grantRead(logImageFn);
     imagesBucket.grantReadWrite(removeImageFn);
     
     imageTable.grantReadWriteData(logImageFn);
+    imageTable.grantReadWriteData(addMetadataFn);
 
     new cdk.CfnOutput(this, "ImagesBucketName", {
       value: imagesBucket.bucketName,
@@ -108,10 +150,6 @@ export class PhotoGalleryAppStack extends cdk.Stack {
 
     new cdk.CfnOutput(this, "ImageTableName", {
       value: imageTable.tableName,
-    });
-
-    new cdk.CfnOutput(this, "DeadLetterQueueUrl", {
-      value: deadLetterQueue.queueUrl,
     });
   }
 }
