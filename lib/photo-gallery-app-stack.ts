@@ -1,54 +1,92 @@
-import * as cdk from 'aws-cdk-lib';
-import { Construct } from 'constructs';
-import * as s3 from 'aws-cdk-lib/aws-s3';
-import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
-import * as sqs from 'aws-cdk-lib/aws-sqs';
-import * as sns from 'aws-cdk-lib/aws-sns';
+import * as cdk from "aws-cdk-lib";
+import * as lambdanode from "aws-cdk-lib/aws-lambda-nodejs";
+import * as lambda from "aws-cdk-lib/aws-lambda";
+import * as s3 from "aws-cdk-lib/aws-s3";
+import * as s3n from "aws-cdk-lib/aws-s3-notifications";
+import * as events from "aws-cdk-lib/aws-lambda-event-sources";
+import * as sqs from "aws-cdk-lib/aws-sqs";
+import * as sns from "aws-cdk-lib/aws-sns";
+import * as subs from "aws-cdk-lib/aws-sns-subscriptions";
+import * as dynamodb from "aws-cdk-lib/aws-dynamodb";
+import { Construct } from "constructs";
 
 export class PhotoGalleryAppStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props?: cdk.StackProps) {
     super(scope, id, props);
-    const photoBucket = new s3.Bucket(this, 'PhotoBucket', {
+
+    const imagesBucket = new s3.Bucket(this, "photo-gallery-images", {
       removalPolicy: cdk.RemovalPolicy.DESTROY,
       autoDeleteObjects: true,
-      versioned: false,
       publicReadAccess: false,
-      blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
-      cors: [
-        {
-          allowedMethods: [
-            s3.HttpMethods.GET,
-            s3.HttpMethods.POST,
-            s3.HttpMethods.PUT,
-          ],
-          allowedOrigins: ['*'],
-          allowedHeaders: ['*'],
-        },
-      ],
     });
-    
-    const imageTable = new dynamodb.Table(this, 'ImageTable', {
-      partitionKey: { name: 'id', type: dynamodb.AttributeType.STRING },
+
+    const imageTable = new dynamodb.Table(this, "ImageTable", {
+      partitionKey: { name: "id", type: dynamodb.AttributeType.STRING },
       billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
       removalPolicy: cdk.RemovalPolicy.DESTROY,
     });
-    
-    const imageTopic = new sns.Topic(this, 'ImageTopic', {
-      displayName: 'Image Events Topic'
+
+    const photoGalleryTopic = new sns.Topic(this, "PhotoGalleryTopic", {
+      displayName: "Photo Gallery Topic",
     });
-    
-    const imageDeadLetterQueue = new sqs.Queue(this, 'ImageDeadLetterQueue', {
-      queueName: 'ImageDeadLetterQueue',
-      retentionPeriod: cdk.Duration.days(14)
+
+    const deadLetterQueue = new sqs.Queue(this, "DeadLetterQueue", {
+      receiveMessageWaitTime: cdk.Duration.seconds(10),
     });
-    
-    const imageUploadQueue = new sqs.Queue(this, 'ImageUploadQueue', {
-      queueName: 'ImageUploadQueue',
-      visibilityTimeout: cdk.Duration.seconds(30),
+
+    const logImageQueue = new sqs.Queue(this, "LogImageQueue", {
+      receiveMessageWaitTime: cdk.Duration.seconds(10),
       deadLetterQueue: {
-        queue: imageDeadLetterQueue,
-        maxReceiveCount: 3
-      }
+        queue: deadLetterQueue,
+        maxReceiveCount: 3,
+      },
+    });
+
+    photoGalleryTopic.addSubscription(
+      new subs.SqsSubscription(logImageQueue, {
+        filterPolicy: {
+          eventName: sns.SubscriptionFilter.stringFilter({
+            allowlist: ["ObjectCreated:*"],
+          }),
+        },
+      })
+    );
+
+    const logImageFn = new lambdanode.NodejsFunction(this, "LogImageFunction", {
+      runtime: lambda.Runtime.NODEJS_22_X,
+      entry: `${__dirname}/../lambdas/logImage.ts`,
+      timeout: cdk.Duration.seconds(15),
+      memorySize: 256,
+      environment: {
+        TABLE_NAME: imageTable.tableName,
+      },
+    });
+
+    imagesBucket.addEventNotification(
+      s3.EventType.OBJECT_CREATED,
+      new s3n.SnsDestination(photoGalleryTopic)
+    );
+
+    logImageFn.addEventSource(
+      new events.SqsEventSource(logImageQueue, {
+        batchSize: 5,
+        maxBatchingWindow: cdk.Duration.seconds(5),
+      })
+    );
+
+    imagesBucket.grantRead(logImageFn);
+    imageTable.grantReadWriteData(logImageFn);
+
+    new cdk.CfnOutput(this, "ImagesBucketName", {
+      value: imagesBucket.bucketName,
+    });
+
+    new cdk.CfnOutput(this, "SNSTopicArn", {
+      value: photoGalleryTopic.topicArn,
+    });
+
+    new cdk.CfnOutput(this, "ImageTableName", {
+      value: imageTable.tableName,
     });
   }
 }
