@@ -8,6 +8,7 @@ import * as sqs from "aws-cdk-lib/aws-sqs";
 import * as sns from "aws-cdk-lib/aws-sns";
 import * as subs from "aws-cdk-lib/aws-sns-subscriptions";
 import * as dynamodb from "aws-cdk-lib/aws-dynamodb";
+import * as iam from "aws-cdk-lib/aws-iam";
 import { Construct } from "constructs";
 
 export class PhotoGalleryAppStack extends cdk.Stack {
@@ -23,6 +24,7 @@ export class PhotoGalleryAppStack extends cdk.Stack {
     const imageTable = new dynamodb.Table(this, "ImageTable", {
       partitionKey: { name: "id", type: dynamodb.AttributeType.STRING },
       billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      stream: dynamodb.StreamViewType.NEW_AND_OLD_IMAGES,
       removalPolicy: cdk.RemovalPolicy.DESTROY,
     });
 
@@ -140,6 +142,17 @@ export class PhotoGalleryAppStack extends cdk.Stack {
       }
     );
 
+    const statusMailerFn = new lambdanode.NodejsFunction(
+      this,
+      "StatusMailerFunction",
+      {
+        runtime: lambda.Runtime.NODEJS_22_X,
+        entry: `${__dirname}/../lambdas/statusMailer.ts`,
+        timeout: cdk.Duration.seconds(15),
+        memorySize: 256,
+      }
+    );
+
     imagesBucket.addEventNotification(
       s3.EventType.OBJECT_CREATED,
       new s3n.SnsDestination(photoGalleryTopic)
@@ -173,12 +186,37 @@ export class PhotoGalleryAppStack extends cdk.Stack {
       })
     );
 
+    statusMailerFn.addEventSource(
+      new events.DynamoEventSource(imageTable, {
+        startingPosition: lambda.StartingPosition.LATEST,
+        batchSize: 5,
+        filters: [
+          {
+            pattern: '{"dynamodb": {"NewImage": {"status": {"S": [{"exists": true}]}}}}',
+          },
+        ],
+      })
+    );
+
     imagesBucket.grantRead(logImageFn);
     imagesBucket.grantReadWrite(removeImageFn);
     
     imageTable.grantReadWriteData(logImageFn);
     imageTable.grantReadWriteData(addMetadataFn);
     imageTable.grantReadWriteData(updateStatusFn);
+    imageTable.grantReadData(statusMailerFn);
+
+    statusMailerFn.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: [
+          "ses:SendEmail",
+          "ses:SendRawEmail",
+          "ses:SendTemplatedEmail",
+        ],
+        resources: ["*"],
+      })
+    );
 
     new cdk.CfnOutput(this, "ImagesBucketName", {
       value: imagesBucket.bucketName,

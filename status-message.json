@@ -2,7 +2,7 @@
     "id": "test.jpeg",
     "date": "2025-05-01",
     "update": {
-      "status": "Pass",
+      "status": "Reject",
       "reason": "Reason for decision"
     }
   }
