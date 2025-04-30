@@ -61,13 +61,7 @@ export class PhotoGalleryAppStack extends cdk.Stack {
     });
 
     photoGalleryTopic.addSubscription(
-      new subs.SqsSubscription(logImageQueue, {
-        filterPolicy: {
-          eventName: sns.SubscriptionFilter.stringFilter({
-            allowlist: ["ObjectCreated:*"],
-          }),
-        },
-      })
+      new subs.SqsSubscription(logImageQueue)
     );
 
     photoGalleryTopic.addSubscription(
