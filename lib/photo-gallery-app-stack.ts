@@ -50,6 +50,14 @@ export class PhotoGalleryAppStack extends cdk.Stack {
       },
     });
 
+    const updateStatusQueue = new sqs.Queue(this, "UpdateStatusQueue", {
+      receiveMessageWaitTime: cdk.Duration.seconds(10),
+      deadLetterQueue: {
+        queue: deadLetterQueue,
+        maxReceiveCount: 3,
+      },
+    });
+
     photoGalleryTopic.addSubscription(
       new subs.SqsSubscription(logImageQueue, {
         filterPolicy: {
@@ -65,6 +73,16 @@ export class PhotoGalleryAppStack extends cdk.Stack {
         filterPolicy: {
           metadata_type: sns.SubscriptionFilter.stringFilter({
             allowlist: ["Caption", "Date", "Name"],
+          }),
+        },
+      })
+    );
+
+    photoGalleryTopic.addSubscription(
+      new subs.SqsSubscription(updateStatusQueue, {
+        filterPolicy: {
+          statusUpdate: sns.SubscriptionFilter.stringFilter({
+            allowlist: ["true"],
           }),
         },
       })
@@ -108,6 +126,20 @@ export class PhotoGalleryAppStack extends cdk.Stack {
       }
     );
 
+    const updateStatusFn = new lambdanode.NodejsFunction(
+      this,
+      "UpdateStatusFunction",
+      {
+        runtime: lambda.Runtime.NODEJS_22_X,
+        entry: `${__dirname}/../lambdas/updateStatus.ts`,
+        timeout: cdk.Duration.seconds(15),
+        memorySize: 256,
+        environment: {
+          TABLE_NAME: imageTable.tableName,
+        },
+      }
+    );
+
     imagesBucket.addEventNotification(
       s3.EventType.OBJECT_CREATED,
       new s3n.SnsDestination(photoGalleryTopic)
@@ -134,11 +166,19 @@ export class PhotoGalleryAppStack extends cdk.Stack {
       })
     );
 
+    updateStatusFn.addEventSource(
+      new events.SqsEventSource(updateStatusQueue, {
+        batchSize: 5,
+        maxBatchingWindow: cdk.Duration.seconds(5),
+      })
+    );
+
     imagesBucket.grantRead(logImageFn);
     imagesBucket.grantReadWrite(removeImageFn);
     
     imageTable.grantReadWriteData(logImageFn);
     imageTable.grantReadWriteData(addMetadataFn);
+    imageTable.grantReadWriteData(updateStatusFn);
 
     new cdk.CfnOutput(this, "ImagesBucketName", {
       value: imagesBucket.bucketName,
